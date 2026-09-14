@@ -9,21 +9,17 @@
     background: #000; overflow: hidden;
     font-family: Arial, sans-serif;
   }
-  #uploadScreen {
+  #loadingScreen {
     position: fixed; inset: 0; display: flex; flex-direction: column;
     align-items: center; justify-content: center; color: #fff; gap: 16px;
     background: radial-gradient(circle at center, #111, #000);
   }
-  #uploadScreen h1 { font-weight: 300; letter-spacing: 2px; }
-  #fileInput { display: none; }
-  #pickBtn, #restartBtn {
-    padding: 12px 28px; font-size: 16px; border-radius: 30px; border: none;
-    background: linear-gradient(90deg, #ff2fd0, #2fd0ff); color: #fff;
-    cursor: pointer; box-shadow: 0 0 20px rgba(255,0,255,0.5);
-  }
+  #loadingScreen h1 { font-weight: 300; letter-spacing: 2px; }
   #restartBtn {
     position: fixed; bottom: 24px; right: 24px; display: none; z-index: 5;
-    opacity: 0.85;
+    opacity: 0.85; padding: 12px 28px; font-size: 16px; border-radius: 30px;
+    border: none; background: linear-gradient(90deg, #ff2fd0, #2fd0ff);
+    color: #fff; cursor: pointer; box-shadow: 0 0 20px rgba(255,0,255,0.5);
   }
   canvas {
     position: fixed; top: 0; left: 0; width: 100%; height: 100%;
@@ -33,15 +29,13 @@
 </head>
 <body>
 
-<div id="uploadScreen">
+<div id="loadingScreen">
   <h1>✨ Neon Sketch Reveal ✨</h1>
-  <p>Apni photo choose karo, animation apne aap shuru ho jayegi</p>
-  <input type="file" id="fileInput" accept="image/*">
-  <button id="pickBtn">Choose Photo</button>
+  <p>Radhe Radhe 🙏 Loading...</p>
 </div>
 
 <canvas id="canvas"></canvas>
-<button id="restartBtn">↻ Restart with new photo</button>
+<button id="restartBtn">↻ Replay</button>
 
 <script>
 // ---------------- CONFIG (mirrors pic.py) ----------------
@@ -58,23 +52,27 @@ const RANDOM_SEED = 42;
 const REFLECTION_HEIGHT_RATIO = 0.28;
 const GLOW_STRENGTH = 1.6;
 
-const fileInput = document.getElementById('fileInput');
-const pickBtn = document.getElementById('pickBtn');
-const uploadScreen = document.getElementById('uploadScreen');
+const KRISHNA_IMAGE_URL = "https://commons.wikimedia.org/wiki/Special:FilePath/Krishna%20as%20Envoy%2C%20by%20Raja%20Ravi%20Varma.jpg";
+
+const loadingScreen = document.getElementById('loadingScreen');
 const restartBtn = document.getElementById('restartBtn');
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
 
-pickBtn.onclick = () => fileInput.click();
 restartBtn.onclick = () => location.reload();
 
-fileInput.onchange = (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
+window.addEventListener('load', () => {
   const img = new Image();
-  img.onload = () => startShow(img);
-  img.src = URL.createObjectURL(file);
-};
+  img.crossOrigin = "anonymous";
+  img.onload = () => {
+    loadingScreen.style.display = 'none';
+    startShow(img);
+  };
+  img.onerror = () => {
+    loadingScreen.innerHTML = "<p style='color:#ff6b6b'>Image load nahi ho payi. Internet connection check karo.</p>";
+  };
+  img.src = KRISHNA_IMAGE_URL;
+});
 
 // seeded RNG (mulberry32) to mimic Python's deterministic shuffle
 function mulberry32(seed) {
