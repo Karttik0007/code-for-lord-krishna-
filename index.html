@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Neon Sketch Reveal</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%; width: 100%;
+    background: #000; overflow: hidden;
+    font-family: Arial, sans-serif;
+  }
+  #uploadScreen {
+    position: fixed; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; color: #fff; gap: 16px;
+    background: radial-gradient(circle at center, #111, #000);
+  }
+  #uploadScreen h1 { font-weight: 300; letter-spacing: 2px; }
+  #fileInput { display: none; }
+  #pickBtn, #restartBtn {
+    padding: 12px 28px; font-size: 16px; border-radius: 30px; border: none;
+    background: linear-gradient(90deg, #ff2fd0, #2fd0ff); color: #fff;
+    cursor: pointer; box-shadow: 0 0 20px rgba(255,0,255,0.5);
+  }
+  #restartBtn {
+    position: fixed; bottom: 24px; right: 24px; display: none; z-index: 5;
+    opacity: 0.85;
+  }
+  canvas {
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    display: none; background: #000;
+  }
+</style>
+</head>
+<body>
+
+<div id="uploadScreen">
+  <h1>✨ Neon Sketch Reveal ✨</h1>
+  <p>Apni photo choose karo, animation apne aap shuru ho jayegi</p>
+  <input type="file" id="fileInput" accept="image/*">
+  <button id="pickBtn">Choose Photo</button>
+</div>
+
+<canvas id="canvas"></canvas>
+<button id="restartBtn">↻ Restart with new photo</button>
+
+<script>
+// ---------------- CONFIG (mirrors pic.py) ----------------
+const FPS = 60;
+const DOT_REVEAL_SECONDS = 3.5;
+const REFINE_SECONDS = 3.0;
+const HOLD_SECONDS = 3.0;
+const CROSSFADE_SECONDS = 1.5;
+const FINAL_HOLD_SECONDS = 3.0;
+
+const MOSAIC_BLOCK_SIZE = 10;
+const DARK_PIXEL_SKIP = 18;
+const RANDOM_SEED = 42;
+const REFLECTION_HEIGHT_RATIO = 0.28;
+const GLOW_STRENGTH = 1.6;
+
+const fileInput = document.getElementById('fileInput');
+const pickBtn = document.getElementById('pickBtn');
+const uploadScreen = document.getElementById('uploadScreen');
+const restartBtn = document.getElementById('restartBtn');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+pickBtn.onclick = () => fileInput.click();
+restartBtn.onclick = () => location.reload();
+
+fileInput.onchange = (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const img = new Image();
+  img.onload = () => startShow(img);
+  img.src = URL.createObjectURL(file);
+};
+
+// seeded RNG (mulberry32) to mimic Python's deterministic shuffle
+function mulberry32(seed) {
+  return function() {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  }
+}
+function shuffle(arr, rng) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+}
+
+function fitImageToCanvas(img, w, h) {
+  const off = document.createElement('canvas');
+  off.width = w; off.height = h;
+  const octx = off.getContext('2d');
+  octx.fillStyle = '#000';
+  octx.fillRect(0, 0, w, h);
+  const scale = Math.min(w / img.width, h / img.height);
+  const nw = img.width * scale, nh = img.height * scale;
+  const ox = (w - nw) / 2, oy = (h - nh) / 2;
+  octx.drawImage(img, ox, oy, nw, nh);
+  return off;
+}
+
+// Sobel edge detection -> neon glow layer
+function makeNeonLayer(baseCanvas) {
+  const w = baseCanvas.width, h = baseCanvas.height;
+  const srcCtx = baseCanvas.getContext('2d');
+  const srcData = srcCtx.getImageData(0, 0, w, h);
+  const src = srcData.data;
+
+  // grayscale
+  const gray = new Float32Array(w * h);
+  for (let i = 0, p = 0; i < src.length; i += 4, p++) {
+    gray[p] = 0.299 * src[i] + 0.587 * src[i+1] + 0.114 * src[i+2];
+  }
+
+  const gx = [-1,0,1,-2,0,2,-1,0,1];
+  const gy = [-1,-2,-1,0,0,0,1,2,1];
+  const edge = new Float32Array(w * h);
+  let maxMag = 1;
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      let sx = 0, sy = 0, k = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const v = gray[(y+dy)*w + (x+dx)];
+          sx += v * gx[k]; sy += v * gy[k]; k++;
+        }
+      }
+      const mag = Math.sqrt(sx*sx + sy*sy);
+      edge[y*w+x] = mag;
+      if (mag > maxMag) maxMag = mag;
+    }
+  }
+
+  const out = document.createElement('canvas');
+  out.width = w; out.height = h;
+  const outCtx = out.getContext('2d');
+  const outData = outCtx.createImageData(w, h);
+  const od = outData.data;
+
+  const threshold = maxMag * 0.18;
+  for (let p = 0; p < w * h; p++) {
+    const i = p * 4;
+    if (edge[p] > threshold) {
+      // boosted original color for neon tint
+      let r = src[i], g = src[i+1], b = src[i+2];
+      const boost = 1.6 * GLOW_STRENGTH;
+      r = Math.min(255, r * boost + 40);
+      g = Math.min(255, g * boost + 40);
+      b = Math.min(255, b * boost + 40);
+      od[i] = r; od[i+1] = g; od[i+2] = b; od[i+3] = 255;
+    } else {
+      od[i] = 0; od[i+1] = 0; od[i+2] = 0; od[i+3] = 255;
+    }
+  }
+  outCtx.putImageData(outData, 0, 0);
+
+  // glow via blur (canvas filter)
+  const glow = document.createElement('canvas');
+  glow.width = w; glow.height = h;
+  const glowCtx = glow.getContext('2d');
+  glowCtx.filter = 'blur(6px) brightness(1.5)';
+  glowCtx.drawImage(out, 0, 0);
+  glowCtx.filter = 'none';
+  glowCtx.globalCompositeOperation = 'lighter';
+  glowCtx.drawImage(out, 0, 0);
+
+  return glow;
+}
+
+function getBlockGrid(imgCanvas, blockSize) {
+  const w = imgCanvas.width, h = imgCanvas.height;
+  const data = imgCanvas.getContext('2d').getImageData(0, 0, w, h).data;
+  const blocks = [];
+  for (let by = 0; by < h; by += blockSize) {
+    for (let bx = 0; bx < w; bx += blockSize) {
+      const i = (by * w + bx) * 4;
+      const r = data[i], g = data[i+1], b = data[i+2];
+      if (Math.max(r, g, b) <= DARK_PIXEL_SKIP) continue;
+      const bw = Math.min(blockSize, w - bx);
+      const bh = Math.min(blockSize, h - by);
+      blocks.push({ x: bx, y: by, w: bw, h: bh, color: `rgb(${r},${g},${b})` });
+    }
+  }
+  return blocks;
+}
+
+function drawBlock(ctx, block) {
+  ctx.fillStyle = block.color;
+  ctx.beginPath();
+  const cx = block.x + block.w / 2, cy = block.y + block.h / 2;
+  const radius = Math.max(1, Math.min(block.w, block.h) / 2);
+  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawReflection(ctx, w, h, sourceCanvas, ratio) {
+  const reflH = Math.floor(h * ratio);
+  ctx.save();
+  ctx.translate(0, h + reflH);
+  ctx.scale(1, -1);
+  ctx.globalAlpha = 0.3;
+  ctx.drawImage(sourceCanvas, 0, h - reflH, w, reflH, 0, 0, w, reflH);
+  ctx.restore();
+  ctx.globalAlpha = 1;
+}
+
+async function startShow(img) {
+  uploadScreen.style.display = 'none';
+  canvas.style.display = 'block';
+  restartBtn.style.display = 'block';
+
+  const W = window.innerWidth, H = window.innerHeight;
+  canvas.width = W; canvas.height = H;
+
+  const base = fitImageToCanvas(img, W, H);
+  const neon = makeNeonLayer(base);
+  const blocks = getBlockGrid(neon, MOSAIC_BLOCK_SIZE);
+  const rng = mulberry32(RANDOM_SEED);
+  shuffle(blocks, rng);
+
+  const delay = 1000 / FPS;
+  const dotFrames = Math.max(1, Math.round(DOT_REVEAL_SECONDS * FPS));
+  const drawCanvas = document.createElement('canvas');
+  drawCanvas.width = W; drawCanvas.height = H;
+  const dctx = drawCanvas.getContext('2d');
+  dctx.fillStyle = '#000'; dctx.fillRect(0, 0, W, H);
+
+  let revealed = 0;
+  await runFrames(dotFrames, (i) => {
+    const target = Math.floor(blocks.length * (i + 1) / dotFrames);
+    for (let k = revealed; k < target; k++) drawBlock(dctx, blocks[k]);
+    revealed = target;
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+    ctx.drawImage(drawCanvas, 0, 0);
+    drawReflection(ctx, W, H, drawCanvas, REFLECTION_HEIGHT_RATIO);
+  }, delay);
+
+  // refine: crossfade dotted canvas into full neon sketch
+  const refineFrames = Math.max(1, Math.round(REFINE_SECONDS * FPS));
+  await runFrames(refineFrames, (i) => {
+    const t = (i + 1) / refineFrames;
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = 1 - t;
+    ctx.drawImage(drawCanvas, 0, 0);
+    ctx.globalAlpha = t;
+    ctx.drawImage(neon, 0, 0);
+    ctx.globalAlpha = 1;
+    drawReflection(ctx, W, H, neon, REFLECTION_HEIGHT_RATIO);
+  }, delay);
+
+  // hold neon sketch
+  const holdFrames = Math.max(1, Math.round(HOLD_SECONDS * FPS));
+  await runFrames(holdFrames, () => {
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+    ctx.drawImage(neon, 0, 0);
+    drawReflection(ctx, W, H, neon, REFLECTION_HEIGHT_RATIO);
+  }, delay);
+
+  // crossfade neon -> original photo
+  const crossFrames = Math.max(1, Math.round(CROSSFADE_SECONDS * FPS));
+  await runFrames(crossFrames, (i) => {
+    const t = (i + 1) / crossFrames;
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = 1 - t;
+    ctx.drawImage(neon, 0, 0);
+    ctx.globalAlpha = t;
+    ctx.drawImage(base, 0, 0);
+    ctx.globalAlpha = 1;
+  }, delay);
+
+  // final hold on original photo
+  const finalFrames = Math.max(1, Math.round(FINAL_HOLD_SECONDS * FPS));
+  await runFrames(finalFrames, () => {
+    ctx.drawImage(base, 0, 0);
+  }, delay);
+}
+
+function runFrames(count, drawFn, delay) {
+  return new Promise((resolve) => {
+    let i = 0;
+    function step() {
+      drawFn(i);
+      i++;
+      if (i < count) {
+        setTimeout(() => requestAnimationFrame(step), delay);
+      } else {
+        resolve();
+      }
+    }
+    requestAnimationFrame(step);
+  });
+}
+</script>
+
+</body>
+</html>
